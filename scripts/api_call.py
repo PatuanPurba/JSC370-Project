@@ -183,12 +183,12 @@ def buildDataset(
             
                 if add_person and (i + 1) % movies_person_limit == 0: 
                     print(len(results_person))
-                    pd.DataFrame(results_person).to_csv(f"data_2/person_{index}.csv")
+                    pd.DataFrame(results_person).to_csv(f"data_1/person_{index}.csv")
                     index += 1
                     results_person = []
 
         if add_person:
-            pd.DataFrame(results_person).to_csv(f"data_2/person_{index}.csv")
+            pd.DataFrame(results_person).to_csv(f"data_1/person_{index}.csv")
         
         movies = pd.DataFrame(results_movie)
 
@@ -200,7 +200,7 @@ def buildDataset(
         ).add_prefix("genre_")
 
         df_encoded = pd.concat([movies, genre_encoded], axis=1)
-        df_encoded.to_csv(f"data_2/{type_movie}.csv")
+        df_encoded.to_csv(f"data_1/{type_movie}.csv")
 
         
         # Try for Multithreading, however seems doesn't work since the heavy part is on 

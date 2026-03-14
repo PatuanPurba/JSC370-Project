@@ -17,7 +17,7 @@ important_crew = [
   "Original Music Composer"
 ]
 
-movie_path = Path("data/movies.csv")
+movie_path = Path("data_1/movies.csv")
 FORCED = True
 if not movie_path.exists() or FORCED:
     short_movie_ids, full_movie_ids = getMovieIDList(

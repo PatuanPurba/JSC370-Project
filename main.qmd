@@ -1,11 +1,12 @@
 ---
-title: "Midterm Project"
+title: "JSC370 Midterm Project Data Report"
 format:
  html:
     embed-resources: true
 jupyter: python3
 
 ---
+
 ```{python}
 #| echo: false
 
@@ -21,6 +22,7 @@ import seaborn as sns
 import os
 ```
 
+github-link: https://github.com/PatuanPurba/JSC370-Project 
 
 # Introduction
 
@@ -45,12 +47,12 @@ The dataset is acquired using the TMDB API once during data building.
 There are 2 categories of the dataset:
 
 ### Movies
-The main dataset consists of movie information from movies that were released between 2000 and 2025, batched by release date. For each month of the release date, sorted by vote count, we try to fetch the first 10 pages, with each pages consist maximum of 20 movies. We assume that the more vote count, the more reliable information we can get. 
+The main dataset consists of movie information from movies that were released between 2000 and 2025, batched by release date. For each month of the release date, sorted by vote count, we try to fetch the first 20 pages for short_dataset and first 40 pages for full_dataset, with each pages consist maximum of 20 movies. We assume that the more vote count, the more reliable information we can get. 
 
 The fetching data process is divided into 2 step. The first step, we use API calls to get all the movie id using previous procedure. The second step, for each movie id, we do API call for each movie id to get detailed information of the movie. The information we take is movie_id, iMDB_id, title, popularity, rating, vote_count, revenue, budget, and genres. To reduce runtime, we save the dataset into csv. Notice, since genres is a list, we directly do multi-label hot encoding before we convert into csv. 
 
 ### Cast and Crew
-This dataset is an extension from movies dataset, containing cast and crew for each movie id. To reduce API calls, we use “append_to_response=credits” so each call on the second stage also include the casts and crews. Since 1 movie id can have several casts and crews, we split the dataset to allow testing analysis on subset of the data. 
+This dataset is an extension from short_movies dataset, containing cast and crew for each movie id. To reduce API calls, we use “append_to_response=credits” so each call on the second stage also include the casts and crews. Since 1 movie id can have several casts and crews, we split the dataset to allow testing analysis on subset of the data. 
 
 Due to running time is dominated by converting row observation into dict, we doesn’t store all the casts and crews. We only pick the first 10 casts since it seems TMDB API already sorted the casts based on their character importance in the movie. While it can capture the general effect of casting, it mean this analysis may not able to capture the effect of popular cameo on the movie. Besides, for the crews, we only take the person with jobs that are director, screenplay, writer, story, producer, photography, and composer. 
 
@@ -211,5 +213,914 @@ Note:
 
 ---
 
+#### Merging Movies Dataset
+
+```{python}
+#| echo: false
+movies = metadata_movies.merge(genre_movies, left_index=True, right_index=True)
+display(movies.head(5))
+```
+Lastly, we will merge the metadata and genre dataset to keep it simple for future analysis.
+
+Note:
+- We don't do outlier analysis on rating since it's hard-capped between 0 - 10. We also don't do outlier on popularity since we don't have clear definition of popularity from TMDB. Besides, we may want to include new feature to encode "extremely popular" movies in future analysis. 
 
 ### Person
+
+#### Overview
+```{python}
+#| echo: false
+display(casting.head(3))
+print("Casting dataset shape:", casting.shape)
+print("Total Unique Person:", len(casting["id"].unique()))
+```
+
+Based on all dataset, there are 5772733 total observations with 132501 unique person (cast and crew)
+
+Notes:
+
+- id in here represents the person id. It's different with cast_id which represents unique person_id-movie_id combination
+- Actor/actress will have job as "Acting", while other jobs represents crew
+
+---
+
+#### Missing Values and Zero Values
+```{python}
+#| echo: false
+
+
+# NaN Value and Zero Values
+
+nan_values = casting.isna().sum()
+zero_values = []
+
+for col in nan_values.index:
+  if is_numeric_dtype(casting[col]):
+    zero_values.append(sum(casting[col] == 0))
+
+  elif is_string_dtype(casting[col]):
+    zero_values.append(sum(casting[col] == ""))
+
+
+summary = pd.DataFrame({
+    "Missing  Values": casting.isna().sum(),
+    "Zero Values": zero_values
+})
+display(summary)
+
+casting["popularity"] = casting["popularity"].replace({0: np.nan})
+casting["gender"] = casting["gender"].replace({0: np.nan})
+```
+
+We can see that there are zero-values in gender and popularity. Based on the defintion, gender = 0 means not specifified / unreported. Therefore, we will change zero values into np.NaN. However, it's possible that some person have zero popularity since we don't have clear definition of popularity from TMDB. Therefore, we will keep zero values in popularity as it is.
+
+---
+
+
+# Preliminary Results
+
+## Movies
+
+### General Analysis
+
+#### Summary Statistics
+```{python}
+#| echo: false
+
+def make_summary_table(df, cols, round_digits=2):
+    summary = pd.DataFrame({
+        "Non-Missing Values": df[cols].notna().sum(),
+        "Missing Values": df[cols].isna().sum(),
+        "Zero Values": (df[cols] == 0).sum(),
+        "Mean": df[cols].mean(),
+        "Median": df[cols].median(),
+        "Std": df[cols].std(),
+        "Min": df[cols].min(),
+        "Q1": df[cols].quantile(0.25),
+        "Q3": df[cols].quantile(0.75),
+        "Max": df[cols].max()
+    })
+    
+    return summary.T
+
+columns = ["popularity", "vote_count", "rating", "weighted_rating", "runtime", 
+           "budget", "revenue", "cast_size", "crew_size", "profit", "roi"]
+
+summary = make_summary_table(movies, columns).astype(object)
+
+count_rows = ["Non-Missing Values", "Missing Values", "Zero Values"]
+float_rows = ["Mean", "Median", "Std", "Min", "Q1", "Q3", "Max"]
+
+summary.loc[count_rows] = summary.loc[count_rows].map(lambda x: f"{x:,.0f}")
+summary.loc[float_rows] = summary.loc[float_rows].map(lambda x: f"{x:,.2f}")
+
+display(summary.T)
+```
+
+Important Notes:
+- There are 16727 total observations in the movies dataset after filtering. However, only around 5000 obsevations have non-missing values for budget and revenue, which are important features for financial performance analysis. Therefore, we may need to consider imputation from iMDB APi or other methods to fill in the missing values in future analysis/predictiion model. 
+
+--- 
+
+#### Trend of Popularity and Rating over Time
+```{python}
+#| echo: false
+
+movies["release_date"] = pd.to_datetime(movies["release_date"])
+
+temp_movies = movies.copy()
+temp_movies["quarter"] = temp_movies["release_date"].dt.to_period("Y").dt.to_timestamp()
+
+
+# We drop most recent quarter to ensure reliability
+agg_date_movies = temp_movies.groupby("quarter", as_index=True).agg(
+    popularity_mean=("popularity", "mean"),
+    weighted_rating_mean=("weighted_rating", "mean"),
+    rating_mean=("rating", "mean"),
+    popularity_median=("popularity", "median"),
+    weighted_rating_median=("weighted_rating", "median"),
+    rating_median=("rating", "median"),
+)[:-1]
+
+fig, axes = plt.subplots(1, 2, figsize=(20, 5))
+
+statistic_type = ["mean", "median"]
+n_ticks = 6
+
+for ax, stat in zip(axes, statistic_type):
+
+  ax.plot(agg_date_movies.index, agg_date_movies[f"weighted_rating_{stat}"],
+             color="blue", label="Weighted Rating", linewidth=0.6)
+  ax.plot(agg_date_movies.index, agg_date_movies[f"rating_{stat}"], 
+             color="red", label="Rating", linewidth=0.6)
+  ax.set_ylabel("Rating (0 - 10)")
+
+
+  ymin, ymax = ax.get_ylim()
+  ymin, ymax = np.floor(ymin), np.ceil(ymax)
+  ticks = np.linspace(ymin, ymax, n_ticks)
+  ax.set_yticks(ticks)
+  ax.spines["top"].set_visible(False)
+  ax.grid(axis="y", linestyle="--", alpha=0.3)
+  
+
+
+  axes_mirror = ax.twinx()
+  axes_mirror.plot(agg_date_movies.index, agg_date_movies[f"popularity_{stat}"],
+                   color="orange", label="Popularity", linewidth=0.6)
+  axes_mirror.set_ylabel("Popularity")
+
+
+  ymin, ymax = axes_mirror.get_ylim()
+  ymin, ymax = np.floor(ymin), np.ceil(ymax)
+  ticks = np.linspace(ymin, ymax, n_ticks)
+  axes_mirror.set_yticks(ticks)
+  axes_mirror.spines["top"].set_visible(False)
+  axes_mirror.set_ylim(0)
+  
+  ax.set_title(f"Trends in Rating and Popularity Over Time ({stat.capitalize()})")
+
+
+  lines1, labels1 = ax.get_legend_handles_labels()
+  ax.legend(lines1, labels1, loc="upper left")
+
+  lines2, labels2 = axes_mirror.get_legend_handles_labels()
+  axes_mirror.legend(lines2, labels2, loc="upper right")
+
+fig.subplots_adjust(wspace=0.25)
+plt.xticks(rotation=45)
+plt.show()
+```
+
+We can see that rating and weighted rating has a slight increasing trend over time. Rating increase from 5.8 to 6.4 while weighted rating increase from 6. 1 into 6.4. We can see weighted rating increase is less significant, indicating that there may be affect from increasing vote_count over time in addition of increasing baseline rating in general. Since trend appear in mean and median, it support that the trend is not driven by outliers.
+
+We can also see increase in popularity over time, with significant drop around 2019-2020. The drop can be driven by COVID-19 that cause reduction in movie revenue. Since popularity is an encoded feature from multiple metrics by TMDB, it suggest that popularity also encode revenue information inside it.
+
+
+--- 
+
+#### Trend of Rating over time by Genre
+```{python}
+#| echo: false
+
+genres = movies.loc[:, movies.columns.str.contains(r"^genre_")].copy()
+genres = genres.rename(columns=lambda x: x.replace("genre_", ""))
+genre_cols = genres.columns.tolist()
+
+movies_with_genres = pd.concat(
+    [movies[["release_date", "weighted_rating"]].copy(), genres],
+    axis=1
+)
+
+movies_with_genres["release_date"] = pd.to_datetime(
+    movies_with_genres["release_date"],
+    errors="coerce"
+)
+
+# drop rows with missing release_date or rating
+movies_with_genres = movies_with_genres.dropna(subset=["release_date", "weighted_rating"])
+
+# Period Cut
+periods = {
+    "2000–2009": (2000, 2010),
+    "2010–2019": (2010, 2020),
+    "2020–2025": (2020, 2026)
+}
+
+# Fix global color mapping across all panels
+all_genre_means = []
+for start, end in periods.values():
+    temp = movies_with_genres[
+        (movies_with_genres["release_date"].dt.year >= start) &
+        (movies_with_genres["release_date"].dt.year < end)
+    ]
+    for genre in genre_cols:
+        mean_rating = temp.loc[temp[genre] == 1, "weighted_rating"].mean()
+        if pd.notna(mean_rating):
+            all_genre_means.append(mean_rating)
+
+# fallback if something goes wrong and list becomes empty
+if len(all_genre_means) == 0:
+    vmin, vmax = 0, 10
+else:
+    vmin = min(all_genre_means)
+    vmax = max(all_genre_means)
+
+norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
+cmap = cm.viridis
+sm = cm.ScalarMappable(cmap=cmap, norm=norm)
+sm.set_array([])
+
+# Plotting
+fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True, sharey=False)
+
+for ax, (label, (start, end)) in zip(axes, periods.items()):
+    temp = movies_with_genres[
+        (movies_with_genres["release_date"].dt.year >= start) &
+        (movies_with_genres["release_date"].dt.year < end)
+    ]
+
+    counts = []
+    mean_ratings = []
+
+    for genre in genre_cols:
+        genre_subset = temp.loc[temp[genre] == 1, "weighted_rating"]
+        counts.append((temp[genre] == 1).sum())
+        mean_ratings.append(genre_subset.mean())
+
+    
+    # Making the colors for plot
+    mean_ratings_for_color = [x for x in mean_ratings]
+    colors = cmap(norm(mean_ratings_for_color))
+
+    ax.bar(genre_cols, counts, color=colors, edgecolor="black", linewidth=0.4)
+
+    ax.set_title(f"Movies Released in {label}, by Genre", fontsize=12)
+    ax.set_ylabel("Number of movies")
+    ax.grid(axis="y", linestyle="--", alpha=0.3)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+# x-axis labels only once at the bottom
+axes[-1].tick_params(axis="x", rotation=45)
+axes[-1].set_xlabel("Genre")
+
+
+# single shared colorbar for all subplots
+fig.subplots_adjust(right=1.1, hspace=0.25)
+cbar = fig.colorbar(sm, ax=axes, orientation="vertical", pad=0.02)
+cbar.set_label("Average weighted rating")
+
+fig.suptitle("Movie Counts by Genre Across Release Periods", fontsize=15, y=0.98)
+fig.tight_layout(rect=[0, 0, 0.93, 0.96])
+
+
+plt.show()
+
+```
+
+We can see that the composition of movie release by genre relatively same across all decade, with drama comedy, thriller, action, and horror dominating the genres. Note that the bottom graph only include 5 years, explaning why the number of movies is only half than previous decade. Indicating that the number of movies released is relatively stable across years. 
+
+There are noticeable change of number of movies released in some genres. For example, there are significant relative decrease in TV Movies genre, and increase in History genre. 
+
+We can see that there are general increase of average weighted rating for all genres, indicated by lighter colour in the later period. We can see that the most significant increase is on animation (from 6.5 to > 7). It may be explained by the recent quality and popularity increase in anime movies. 
+
+---
+
+#### Genre Correlation
+```{python}
+#| echo: false
+genres = movies.loc[:, movies.columns.str.contains(r"^genre_")].copy()
+genres = genres.rename(columns = lambda x: x.replace("genre_", ""))
+
+plt.figure(figsize=(12, 10))
+sns.heatmap(genres.corr(), annot=False, cmap="bwr", vmin=-1, vmax=1)
+plt.title("Correlation Map of Genre")
+plt.show()
+```
+
+We can see that there is positive correlation between Animation and Family genre. Besides, there is also negative correlation between Commedy and Thriller genre. However, overall, there no significant correlation between genres, indicating that movies can have various combination of genres without specific pattern.
+
+--- 
+
+#### Financial Attribute Distribution
+```{python}
+#| echo: false
+
+plot_data = {
+    "Budget": movies["budget"].dropna(),
+    "Revenue": movies["revenue"].dropna()
+}
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 5), dpi=150)
+
+for ax, (label, values) in zip(axes, plot_data.items()):
+    values = values[values >= 0]
+    log_values = np.log1p(values)
+
+    ax.hist(log_values, bins=30, edgecolor="black", alpha=0.8)
+    ax.axvline(np.median(log_values), linestyle="--", linewidth=2, label="Median")
+
+    ax.set_title(f"Distribution of {label}", fontsize=13)
+    ax.set_xlabel(f"log(1 + {label.lower()})", fontsize=11)
+    ax.set_ylabel("Number of movies", fontsize=11)
+    ax.legend(frameon=False)
+
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+fig.suptitle("Movie Budget and Revenue Distributions", fontsize=15, y=1.03)
+plt.tight_layout()
+plt.show()
+
+```
+
+In these graph, from the movies with non-missing values, we can see that both budget and revenue have highly left-skewed distribution. The Budget and Revenue has median around e^16 = 8.9 million. Further, there seems no significant outlier in the log scale. It's important to note that value of 18 in log scale is around 66 millionin real value, which is almost 10x larger than the real value of observation with value 15 in log scale
+
+While it's left-skewed, the distribution is quite good, which may suggest to use log-transfomation on budget for predictive model
+
+Important Note:
+- Since there are many missing values in budget and revenue, the distribution may not represent the true distribution of budget and revenue across all movies. Including zero-values will make the graph multi-modal with first peak in 0 and second peak on 16 for both budget and revenue
+
+--- 
+#### Relationship between cast and crew size with financial performance and audience preception
+
+```{python}
+#| echo: false
+
+
+# Is there any relation between Cast Size and Crew Size with Profit and ROI
+
+temp = movies.sample(3000, random_state=18)
+temp = temp[
+    (temp["cast_size"] <= 200) &
+    (temp["crew_size"] <= 200) &
+    (temp["profit"] > 0)
+]
+
+fig, axes = plt.subplots(1, 3, figsize=(24, 5))
+
+
+sc_1 = axes[0].scatter(np.log(temp["cast_size"] + 1), np.log(temp["crew_size"] + 1), c=temp["weighted_rating"])
+axes[0].set_xlabel("Cast Size (Log)")
+axes[0].set_ylabel("Crew Size (Log)")
+axes[0].set_title("Impact of Cast and Crew Size on Weighted Rating")
+axes[0].spines["top"].set_visible(False)
+axes[0].spines["right"].set_visible(False)
+axes[0].grid(axis="y", linestyle="--", alpha=0.3)
+axes[0].grid(axis="x", linestyle="--", alpha=0.3)
+plt.colorbar(sc_1, label="Weighted Rating")
+
+sc_2 = axes[1].scatter(np.log(temp["cast_size"] + 1), np.log(temp["crew_size"] + 1), c=np.log(temp["popularity"]))
+axes[1].set_xlabel("Cast Size (Log)")
+axes[1].set_ylabel("Crew Size (Log)")
+axes[1].set_title("Impact of Cast and Crew Size on Popularity")
+axes[1].spines["top"].set_visible(False)
+axes[1].spines["right"].set_visible(False)
+axes[1].grid(axis="y", linestyle="--", alpha=0.3)
+axes[1].grid(axis="x", linestyle="--", alpha=0.3)
+plt.colorbar(sc_2, label="Popoularity(Log)")
+
+sc_3 = axes[2].scatter(np.log(temp["cast_size"] + 1), np.log(temp["crew_size"] + 1), c=np.log(temp["revenue"] - temp["budget"]))
+axes[2].set_xlabel("Cast Size (Log)")
+axes[2].set_ylabel("Crew Size (Log)")
+axes[2].set_title("Impact of Cast and Crew Size on Profit")
+axes[2].spines["top"].set_visible(False)
+axes[2].spines["right"].set_visible(False)
+axes[2].grid(axis="y", linestyle="--", alpha=0.3)
+axes[2].grid(axis="x", linestyle="--", alpha=0.3)
+plt.colorbar(sc_3, label="Profit (Log)")
+
+plt.show()
+
+```
+
+From the graph, it suggest positive impact of cast and crew size on weighted rating, popularity and profit. The impact is most noticeable on profit since the bullet point tend to be more yellow-ish on upper right region. 
+
+Important Notes:
+- We only sample 3000 movies randomly to reduce crowdedness and do some filtering on cast size, crew size, and profit to make the graph more readable. Therefore, the graph may not represent the true relationship between cast and crew size with financial performance and audience preception across all movies.
+
+- Both axes are in log-scale, which may explains why there is linear relationship resemblance between cast size and crew size. However, it may suggest that it's very rare for a movie to have small cast size but very large crew size, or vice versa. 
+
+---
+
+### Success-Driven Analysis
+
+#### Success Indicator Definition
+```{python}
+#| echo: false
+
+# Define Movie Success Indicator
+
+# Commercial Success = 1
+profit_mask = movies["profit"].notna()
+profit_q75 = movies.loc[profit_mask, "profit"].quantile(0.75)
+
+# Commercial success = 1 if the movie has profit 
+movies["commercial_success"] = np.where(
+    profit_mask,
+    (movies["profit"] >= profit_q75).astype(int),
+    0
+)
+
+
+# Audience Success = 1
+pop_q75 = movies["popularity"].quantile(0.75)
+
+audience_mask = (
+    movies["weighted_rating"].notna() &
+    movies["popularity"].notna() &
+    (movies["popularity"] >= pop_q75)
+)
+
+wr_q75 = movies.loc[audience_mask, "weighted_rating"].quantile(0.75)
+movies["audience_success"] = np.where(
+    audience_mask,
+    (movies["weighted_rating"] >= wr_q75).astype(int),
+    0
+)
+
+print("Profit 75th percentile:", profit_q75)
+print("Popularity 75th percentile:", pop_q75)
+print("Weighted rating 75th percentile (eligible subset):", wr_q75)
+
+print("\nCommercial success counts:")
+print(movies["commercial_success"].value_counts(dropna=False))
+
+print("\nAudience success counts:")
+print(movies["audience_success"].value_counts(dropna=False))
+```
+
+We define 2 success indicators, commercial success and audience success, to capture the financial and audience reception of the movie.
+
+Commercial Success: Movies with profit higher than 75th percentile of profit among movies with non-missing profit.
+
+Audience Success: Movies with popularity higher than 75th percentile of popularity among movies and has weighted rating higher than 75th percentile of weighted rating among movies with non-missing popularity and weighted rating.
+
+After applying the definition, there are 973 (5.8%) commercially successfuly movies and 1049 (6.25%) audience successful movies.
+
+Important Note:
+- In this analysis, we focus on success rate in general term rather than separated by genre. Therefore, it's possible that "average" attribute movie among animation movies appear to be successful compared to other movies from other genres just by simply because animation tend to have higher attribute. 
+
+---
+
+#### Trend on Success Rate over Time
+```{python}
+#| echo: false
+movies["release_date"] = pd.to_datetime(movies["release_date"])
+
+temp_movies = movies.copy()
+temp_movies["quarter"] = temp_movies["release_date"].dt.to_period("Q").dt.to_timestamp()
+temp_movies["year"] = temp_movies["release_date"].dt.to_period("Y").dt.to_timestamp()
+
+
+# We drop most recent quarter to ensure reliability
+agg_date_movies = temp_movies.groupby("quarter", as_index=True).agg(
+    commercial_success=("commercial_success", "mean"),
+    audience_success=("audience_success", "mean")
+)[:-1]
+
+agg_date_movies_year = temp_movies.groupby("year", as_index=True).agg(
+    commercial_success=("commercial_success", "mean"),
+    audience_success=("audience_success", "mean")
+)[:-1]
+
+plt.figure(figsize=(20, 5))
+
+statistic_type = ["mean", "median"]
+n_ticks = 6
+
+ax = plt.gca()
+ax.plot(agg_date_movies.index, agg_date_movies[f"commercial_success"],
+            color="blue", label="Commercial Success Rate (Quarter)", linewidth=0.4)
+
+ax.plot(agg_date_movies_year.index, agg_date_movies_year[f"commercial_success"],
+            color="blue", label="Commercial Success Rate (Year)", linewidth=1)
+ax.set_ylabel("Commercial Success Rate")
+
+
+
+ymin, ymax = 0, 0.2
+ticks = np.linspace(ymin, ymax, n_ticks)
+ax.set_yticks(ticks)
+ax.spines["top"].set_visible(False)
+ax.grid(axis="y", linestyle="--", alpha=0.3)
+
+ax.xaxis.set_major_locator(mdates.YearLocator())
+ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+
+
+axes_mirror = ax.twinx()
+axes_mirror.plot(agg_date_movies.index, agg_date_movies[f"audience_success"],
+                  color="orange", label="Audience Success Rate (Quarter)", linewidth=0.4)
+
+axes_mirror.plot(agg_date_movies_year.index, agg_date_movies_year[f"audience_success"],
+                  color="orange", label="Audience Success Rate (Year)", linewidth=1)
+axes_mirror.set_ylabel("Audience Success Rate")
+
+
+ymin, ymax = 0, 0.2
+ticks = np.linspace(ymin, ymax, n_ticks)
+axes_mirror.set_yticks(ticks)
+axes_mirror.spines["top"].set_visible(False)
+axes_mirror.set_ylim(0)
+
+ax.set_title(f"Trends in Commercial and Audience Success Rate Over Time")
+
+
+lines1, labels1 = ax.get_legend_handles_labels()
+ax.legend(lines1, labels1, loc="upper left")
+
+lines2, labels2 = axes_mirror.get_legend_handles_labels()
+axes_mirror.legend(lines2, labels2, loc="upper right")
+
+fig.subplots_adjust(wspace=0.25)
+plt.xticks(rotation=45)
+plt.show()
+
+```
+
+From the graph, we can see increasing trend on audience success rate over time, from 3.8% into around 8% in 2024. However, it's important to note that there is general increase in weighted rating based on previous analysis. 
+
+There is also slight increase in commercial success rate, from around 4% into around 8% in 2018, before having significant drop in 2020.  We can also see that the commercial success rate is back to initial rate, 4%, in 2024. The drop in 2020 can be driven by COVID-19 that cause reduction in movie revenue
+
+Based on the quarter the movie is released, we can see there is tend to be sudden drop in commercial success rate on Quarter 2, 3 (Summer). While not in all year, this pattern seems happen in more than half of the years.
+
+---
+
+#### Trend of Success Rate over time by Genre
+```{python}
+#| echo: false
+# --- 1. Prepare genre table ---
+genres = movies.loc[:, movies.columns.str.contains(r"^genre_")].copy()
+genres = genres.rename(columns=lambda x: x.replace("genre_", ""))
+genre_cols = genres.columns.tolist()
+
+
+
+movies_with_genres = pd.concat(
+    [movies[["release_date", "audience_success"]].copy(), genres],
+    axis=1
+)
+
+movies_with_genres["release_date"] = pd.to_datetime(
+    movies_with_genres["release_date"],
+    errors="coerce"
+)
+
+# drop rows with missing release_date or rating
+movies_with_genres = movies_with_genres.dropna(subset=["release_date", "audience_success"])
+
+# --- 2. Define periods ---
+periods = {
+    "2000–2009": (2000, 2010),
+    "2010–2019": (2010, 2020),
+    "2020–2025": (2020, 2026)
+}
+
+# --- 3. Fix a global color scale across all panels ---
+all_genre_means = []
+for start, end in periods.values():
+    temp = movies_with_genres[
+        (movies_with_genres["release_date"].dt.year >= start) &
+        (movies_with_genres["release_date"].dt.year < end)
+    ]
+    for genre in genre_cols:
+        mean_rating = temp.loc[temp[genre] == 1, "audience_success"].mean()
+        if pd.notna(mean_rating):
+            all_genre_means.append(mean_rating)
+
+# fallback if something goes wrong and list becomes empty
+if len(all_genre_means) == 0:
+    vmin, vmax = 0, 10
+else:
+    vmin = min(all_genre_means)
+    vmax = max(all_genre_means)
+
+norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
+cmap = cm.viridis
+sm = cm.ScalarMappable(cmap=cmap, norm=norm)
+sm.set_array([])
+
+# --- 4. Build the figure ---
+fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True, sharey=False)
+
+for ax, (label, (start, end)) in zip(axes, periods.items()):
+    temp = movies_with_genres[
+        (movies_with_genres["release_date"].dt.year >= start) &
+        (movies_with_genres["release_date"].dt.year < end)
+    ]
+
+    counts = []
+    mean_ratings = []
+
+    for genre in genre_cols:
+        genre_subset = temp.loc[temp[genre] == 1, "audience_success"]
+        counts.append((temp[genre] == 1).sum())
+        mean_ratings.append(genre_subset.mean())
+
+    
+    # Making the colors for plot
+    mean_ratings_for_color = [x for x in mean_ratings]
+    colors = cmap(norm(mean_ratings_for_color))
+
+    ax.bar(genre_cols, counts, color=colors, edgecolor="black", linewidth=0.4)
+
+    ax.set_title(f"Movies Released in {label}, by Genre", fontsize=12)
+    ax.set_ylabel("Number of movies")
+    ax.grid(axis="y", linestyle="--", alpha=0.3)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+# x-axis labels only once at the bottom
+axes[-1].tick_params(axis="x", rotation=45)
+axes[-1].set_xlabel("Genre")
+
+
+# single shared colorbar for all subplots
+fig.subplots_adjust(right=1.1, hspace=0.25)
+cbar = fig.colorbar(sm, ax=axes, orientation="vertical", pad=0.02)
+cbar.set_label("Audience Success Rate")
+
+fig.suptitle("Movie Counts by Genre Across Release Periods", fontsize=15, y=0.98)
+fig.tight_layout(rect=[0, 0, 0.93, 0.96])
+plt.show()
+```
+
+There are some genres that gain noticeable increase in audience success rate, including adventure, animation, family, fantasy, and science fiction. However, most of the increase occur on current decade. Genre with the most significant increase is animation, with audience success rate increase from around 15% into around 30%, and adventure with audience success rate increase from around 15% into around 20%.
+
+Important Note:
+- Notice that very high success rate on aniimation and adventure. As mentioned in previous analysis, our success rate is based on general comparison across all movies, regardless its genres. Therefore, very high success rate may be caused due to higher baseline weighted rating and popularity for these genres compared to other genres. 
+
+---
+
+```{python}
+#| echo: false
+
+# --- 1. Prepare genre table ---
+genres = movies.loc[:, movies.columns.str.contains(r"^genre_")].copy()
+genres = genres.rename(columns=lambda x: x.replace("genre_", ""))
+genre_cols = genres.columns.tolist()
+
+
+
+movies_with_genres = pd.concat(
+    [movies[["release_date", "commercial_success"]].copy(), genres],
+    axis=1
+)
+
+movies_with_genres["release_date"] = pd.to_datetime(
+    movies_with_genres["release_date"],
+    errors="coerce"
+)
+
+# drop rows with missing release_date or rating
+movies_with_genres = movies_with_genres.dropna(subset=["release_date", "commercial_success"])
+
+# --- 2. Define periods ---
+periods = {
+    "2000–2009": (2000, 2010),
+    "2010–2019": (2010, 2020),
+    "2020–2025": (2020, 2026)
+}
+
+# --- 3. Fix a global color scale across all panels ---
+all_genre_means = []
+for start, end in periods.values():
+    temp = movies_with_genres[
+        (movies_with_genres["release_date"].dt.year >= start) &
+        (movies_with_genres["release_date"].dt.year < end)
+    ]
+    for genre in genre_cols:
+        mean_rating = temp.loc[temp[genre] == 1, "commercial_success"].mean()
+        if pd.notna(mean_rating):
+            all_genre_means.append(mean_rating)
+
+# fallback if something goes wrong and list becomes empty
+if len(all_genre_means) == 0:
+    vmin, vmax = 0, 10
+else:
+    vmin = min(all_genre_means)
+    vmax = max(all_genre_means)
+
+norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
+cmap = cm.viridis
+sm = cm.ScalarMappable(cmap=cmap, norm=norm)
+sm.set_array([])
+
+# --- 4. Build the figure ---
+fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True, sharey=False)
+
+for ax, (label, (start, end)) in zip(axes, periods.items()):
+    temp = movies_with_genres[
+        (movies_with_genres["release_date"].dt.year >= start) &
+        (movies_with_genres["release_date"].dt.year < end)
+    ]
+
+    counts = []
+    mean_ratings = []
+
+    for genre in genre_cols:
+        genre_subset = temp.loc[temp[genre] == 1, "commercial_success"]
+        counts.append((temp[genre] == 1).sum())
+        mean_ratings.append(genre_subset.mean())
+
+    
+    # Making the colors for plot
+    mean_ratings_for_color = [x for x in mean_ratings]
+    colors = cmap(norm(mean_ratings_for_color))
+
+    ax.bar(genre_cols, counts, color=colors, edgecolor="black", linewidth=0.4)
+
+    ax.set_title(f"Movies Released in {label}, by Genre", fontsize=12)
+    ax.set_ylabel("Number of movies")
+    ax.grid(axis="y", linestyle="--", alpha=0.3)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+# x-axis labels only once at the bottom
+axes[-1].tick_params(axis="x", rotation=45)
+axes[-1].set_xlabel("Genre")
+
+
+# single shared colorbar for all subplots
+fig.subplots_adjust(right=1.1, hspace=0.25)
+cbar = fig.colorbar(sm, ax=axes, orientation="vertical", pad=0.02)
+cbar.set_label("Commercial Success Rate")
+
+fig.suptitle("Movie Counts by Genre Across Release Periods", fontsize=15, y=0.98)
+fig.tight_layout(rect=[0, 0, 0.93, 0.96])
+plt.show()
+```
+
+Unlike audience success rate, significant increase happens in 2010-2019 decade rather than current decade. It's probably because the commercial success rate significant drop due to post-COVID-19
+
+Almost same as audience success rate, genres with significant increase are  Action, Adventure, Fantasy, and Science fiction. 
+
+Appearing in both graphs, it may suggest that adventure, fantasy and science fiction are genres with noticeable positive trend in success rate overtime. 
+
+--- 
+
+#### Relationshp betweeen Cast and Crew Size with Success Rate
+```{python}
+#| echo: false
+
+# -----------------------------
+# Prepare data
+temp = movies.copy()
+
+temp = temp[
+    (temp["cast_size"] > 0) &
+    (temp["crew_size"] > 0) &
+    temp["audience_success"].notna() &
+    temp["commercial_success"].notna()
+].copy()
+
+temp["log_cast_size"] = np.log1p(temp["cast_size"])
+temp["log_crew_size"] = np.log1p(temp["crew_size"])
+
+# -----------------------------
+# Create bins
+n_bins = 8
+
+cast_bins = np.linspace(temp["log_cast_size"].min(), temp["log_cast_size"].max(), n_bins + 1)
+crew_bins = np.linspace(temp["log_crew_size"].min(), temp["log_crew_size"].max(), n_bins + 1)
+
+# Classify each row into bin
+temp["cast_bin"] = pd.cut(temp["log_cast_size"], bins=cast_bins, include_lowest=True)
+temp["crew_bin"] = pd.cut(temp["log_crew_size"], bins=crew_bins, include_lowest=True)
+
+# ---------------------------
+# Builing Success Rate Matrix
+def make_rate_table(df, outcome):
+    rate = (
+        df.groupby(["crew_bin", "cast_bin"], observed=False)[outcome]
+        .mean()
+        .unstack()
+    )
+
+    count = (
+        df.groupby(["crew_bin", "cast_bin"], observed=False)
+        .size()
+        .unstack()
+    )
+
+    return rate, count
+
+aud_rate, aud_count = make_rate_table(temp, "audience_success")
+com_rate, com_count = make_rate_table(temp, "commercial_success")
+
+# Optional: mask cells with too few observations
+min_count = 5
+aud_plot = aud_rate.mask(aud_count < min_count)
+com_plot = com_rate.mask(com_count < min_count)
+
+# ------------------------------------------------
+# Plotting
+fig, axes = plt.subplots(1, 2, figsize=(18, 8), sharex=True, sharey=True)
+fig.subplots_adjust(right=1.2)
+
+plots = [
+    (aud_plot, aud_count, "Audience Success Rate"),
+    (com_plot, com_count, "Commercial Success Rate")
+]
+
+for ax, (rate_tbl, count_tbl, title) in zip(axes, plots):
+    im = ax.imshow(
+        rate_tbl.values,
+        origin="lower",
+        aspect="auto",
+        vmin=0,
+        vmax=1
+    )
+
+    ax.set_title(title, fontsize=12)
+    ax.set_xlabel("Log(Cast Size + 1)")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    # Use bin centers as tick positions
+    x_idx = np.arange(rate_tbl.shape[1])
+    y_idx = np.arange(rate_tbl.shape[0])
+
+    # Create cleaner tick labels from interval midpoints
+    x_labels = [f"{interval.mid:.1f}" for interval in rate_tbl.columns]
+    y_labels = [f"{interval.mid:.1f}" for interval in rate_tbl.index]
+
+    # Show fewer ticks if too crowded
+    step_x = max(1, len(x_labels) // 5)
+    step_y = max(1, len(y_labels) // 5)
+
+    ax.set_xticks(x_idx[::step_x])
+    ax.set_xticklabels(x_labels[::step_x])
+    ax.set_yticks(y_idx[::step_y])
+    ax.set_yticklabels(y_labels[::step_y])
+
+    # Annotate with counts only, to avoid clutter
+    for i in range(rate_tbl.shape[0]):
+        for j in range(rate_tbl.shape[1]):
+            n = count_tbl.iloc[i, j]
+            r = rate_tbl.iloc[i, j]
+
+            if pd.notna(r) and n >= min_count:
+                ax.text(
+                    j, i, f"n={int(n)}",
+                    ha="center", va="center",
+                    fontsize=10, color="white" if r < 0.5 else "black"
+                )
+
+axes[0].set_ylabel("Log(Crew Size + 1)")
+
+cbar = fig.colorbar(im, ax=axes)
+cbar.set_label("Proportion Successful")
+
+fig.suptitle("Success Rate Across Cast and Crew Size Bins", fontsize=14, y=1.02)
+plt.tight_layout()
+plt.show()
+```
+
+There is positive relationship between cast and crew size with both audience success rate and commercial success rate. The impact seems to be more significant on commercial success rate rather than audience success rate. Besides, the impact tend to be larger when both cast and crew size are increase rather than only 1 of them. 
+
+Important Note:
+- We can see that the impact more noticeable as both large and not really noticeable on small team. However, note that both axes are in log-scale, which mean 1-unit difference in low-value is significantly lower in real value than 1-unit different in high value. It suggest than the impact is linear rather than exponential
+
+---
+
+
+# Summary
+##### Question 1:
+From overall analysis, we found some insight about attribute that can be a strong predictors for rating, popularity and success rate.
+
+- Time of release: Based on the quarter when the movie released, movies that are released in quarter 2, 3 (Summer) tend to have lower commercial success rate.
+
+- Crew and Cast Size: These columns has quite strong relationship on popularity and success rate. However, it seems not really relevant on rating
+
+- Genres: As a overall, genre seems not be very strong predictor since there is only slight noticeable difference of popularity, rating and success rate between each genre. However, from our analysis, binary indicator of adventure, fantasy, and science fiction may be a good preditors. 
+
+##### Question 2:
+Based on the analysis, we can see a quite relationship (Likely be linear) between cast size and crew sie with popularity and success rate
+
+##### Question 3:
+
+##### Question 4:
+Based on the genre analysis, we can see that the composition of movie release by genre is relatively same across decade. It may suggest that there is no temporal shift in genre preference. Note that this conclusion assume the production house tend to make movies based on society's genre preference. 
