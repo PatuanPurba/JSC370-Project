@@ -1,0 +1,215 @@
+---
+title: "Midterm Project"
+format:
+ html:
+    embed-resources: true
+jupyter: python3
+
+---
+```{python}
+#| echo: false
+
+import pandas as pd
+from pandas.api.types import is_numeric_dtype, is_string_dtype
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from sklearn.preprocessing import MultiLabelBinarizer
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
+import seaborn as sns
+import os
+```
+
+
+# Introduction
+
+## Data Background
+
+The main datasets are acquired from The Movie Database (TMDB), a massive, community-built, and free online database for movie and TV show metadata, including cast, crew, posters, and trailers. This analysis will focus on the movie metadata, cast, and crew. All datasets for analysis span from 2000 - 2025 and are fetched using the TMDB API. Note to remember that this website is different from IMDb. 
+
+## Research Question
+Main Research Question:
+- What are the strong covariates in predicting film revenue and gross profit
+- How strong is the relationship between casts and crew, including team size, with film popularity and revenue
+
+Additional Research Questions:
+- Are there “hub” people (high centrality) who are associated with higher box office or ratings
+- Is there any temporal genre preference (Where specific genres tend to have higher popularity and/or vote count by default) between 2000 and 2025
+
+
+# Methods
+
+## Data Collection
+The dataset is acquired using the TMDB API once during data building.
+There are 2 categories of the dataset:
+
+### Movies
+The main dataset consists of movie information from movies that were released between 2000 and 2025, batched by release date. For each month of the release date, sorted by vote count, we try to fetch the first 10 pages, with each pages consist maximum of 20 movies. We assume that the more vote count, the more reliable information we can get. 
+
+The fetching data process is divided into 2 step. The first step, we use API calls to get all the movie id using previous procedure. The second step, for each movie id, we do API call for each movie id to get detailed information of the movie. The information we take is movie_id, iMDB_id, title, popularity, rating, vote_count, revenue, budget, and genres. To reduce runtime, we save the dataset into csv. Notice, since genres is a list, we directly do multi-label hot encoding before we convert into csv. 
+
+### Cast and Crew
+This dataset is an extension from movies dataset, containing cast and crew for each movie id. To reduce API calls, we use “append_to_response=credits” so each call on the second stage also include the casts and crews. Since 1 movie id can have several casts and crews, we split the dataset to allow testing analysis on subset of the data. 
+
+Due to running time is dominated by converting row observation into dict, we doesn’t store all the casts and crews. We only pick the first 10 casts since it seems TMDB API already sorted the casts based on their character importance in the movie. While it can capture the general effect of casting, it mean this analysis may not able to capture the effect of popular cameo on the movie. Besides, for the crews, we only take the person with jobs that are director, screenplay, writer, story, producer, photography, and composer. 
+
+
+## Data Wrangling
+
+### Movies
+During data wrangling, we will divide movie into metadata and genres to keep simplicity. 
+
+```{python}
+#| echo: false
+
+# Movies
+
+data_dir = "data_1/"
+
+movies = pd.read_csv(os.path.join(data_dir, "short_movie.csv")).drop_duplicates(subset=["movie_id"])
+movies = movies.set_index("movie_id").drop(["Unnamed: 0"], axis=1)
+num_cols = movies.select_dtypes(include="number").columns
+movies[num_cols] = movies[num_cols].astype(float)
+
+
+
+# Person
+
+casting = pd.DataFrame()
+for dir in os.listdir(data_dir):
+    if dir.startswith("person_"):
+        temp_person = pd.read_csv(os.path.join(data_dir, dir))
+        casting = pd.concat([casting, temp_person])
+
+
+casting = casting.rename(columns={"Unnamed: 0": "cast_id"}).set_index("cast_id")
+```
+
+```{python}
+#| echo: false
+
+metadata_movies = movies.iloc[:, ~movies.columns.str.contains(r"^genre")].copy()
+
+genre_movies = movies.loc[:, movies.columns.str.contains(r"^genre_")].copy()
+
+display(metadata_movies.head(5))
+print("Movies dataset shape:", movies.shape)
+print("\n\n")
+
+display(genre_movies.head(4))
+print("Casting dataset shape:", casting.shape)
+```
+
+#### Missing Values and Zero Values
+```{python}
+#| echo: false
+
+# NaN Value and Zero Values
+
+summary = pd.DataFrame({
+    "NaN  Values": metadata_movies.isna().sum(),
+    "Zero Values": (metadata_movies == 0).sum()
+})
+display(summary)
+
+# Change from Zero Values into np.NaN for some column
+non_zero_cols = ["runtime", "budget", "revenue", "popularity"]
+metadata_movies.loc[:, non_zero_cols] = metadata_movies.loc[:, non_zero_cols].replace({0: np.nan})
+
+```
+
+There is few original missing values in the dataset. Besides, we can see that most of the missing values comes from budget and revenue. Based on the observation, 0 values can mean 2 things: either its value is negligible or the value is missing/unreported. We can also see zero values in runtime, which is not possible. Therefore, for these columns, we will change zero values into np.NaN to represent missing/unreported value.
+
+There are some zero values in cast_size and crew_size, but since it is possible that some movies have no cast or crew, we will keep the zero values as it is.
+
+
+#### Filtering Dataset and Feature Engineering
+
+##### Financial Performance
+```{python}
+#| echo: false
+
+metadata_movies.loc[:, "profit"] = metadata_movies["revenue"] - metadata_movies["budget"]
+metadata_movies.loc[:, "roi"] = np.where(metadata_movies["budget"] > 0, metadata_movies["revenue"] / metadata_movies["budget"], np.nan)
+
+
+# Filtering ROI due to unexpectedly high value
+threshold = metadata_movies["roi"].quantile(0.99)
+filtered = (metadata_movies["roi"].isna()) | (metadata_movies["roi"] < threshold)
+
+print("Unfiltered ROI Movie Observation:", len(metadata_movies))
+
+metadata_movies = metadata_movies[filtered]
+print("filtered ROI Movie Observation:", len(metadata_movies))
+```
+
+We create 2 new features, profit and ROI, to capture the financial performance of the movie. Profit is calculated by subtracting budget from revenue, while ROI is calculated by dividing revenue by budget. However, since ROI can be extremely high for movies with very low budget, we will filter out movies with ROI higher than 99th percentile to reduce the influence of outliers in the analysis.
+
+---
+
+##### Language
+```{python}
+#| echo: false
+
+# Filtering Language
+threshold = 200 # Hard-coded based on manual observation
+
+series = pd.Series(metadata_movies["language"].value_counts())
+series[series > threshold]
+valid_lang = series[series > threshold].index
+
+print("Total Language:", len(metadata_movies["language"].unique()), ", Total Observations:", len(metadata_movies))
+
+metadata_movies = metadata_movies[metadata_movies["language"].isin(valid_lang)]
+
+print("Valid Language:", len(valid_lang), ", Total Observations:", len(metadata_movies))
+```
+
+Since there are many languages in the dataset, we will filter out languages that have less than 200 observations to reduce the dimensionality of the dataset. Notice that 200 is a hard-coded threshold based on manually observing data to keep balance between keeping number of observations and reduce dimensionality.
+
+As a result, there are 11 unique languages with total observation left is 16727.
+
+---
+
+```{python}
+#| echo: false
+
+# Using Bayesian Weighted Average Rating
+
+# Quantile for count of pseudo_votes
+pseudo_votes = metadata_movies["vote_count"].quantile(0.25)
+
+
+r = metadata_movies["rating"]
+avg_r = metadata_movies["rating"].mean()
+v = metadata_movies["vote_count"]
+
+metadata_movies["weighted_rating"] = (r  * v / (v + pseudo_votes) + 
+                             avg_r* pseudo_votes / (v + pseudo_votes))
+summary = metadata_movies["weighted_rating"].describe()
+print("Weighted Rating Summary:")
+
+result = pd.DataFrame([{
+    "count": summary["count"],
+    "mean": round(summary["mean"], 2),
+    "min": round(summary["min"], 2),
+    "max": round(summary["max"], 2)
+}])
+display(result.style.hide(axis="index").format("{:.2f}"))
+```
+
+Since the rating can be biased for movies with low vote count, we will use Bayesian Weighted Average Rating to adjust the rating. The formula is (r * v / (v + pseudo_votes) + avg_r* pseudo_votes / (v + pseudo_votes)), where:
+
+- r: original rating of the movie
+- v: vote count of the movie
+- avg_r: average rating across all movies
+- pseudo_votes: a quantile of vote count that we will use as a threshold to determine. Can be seen as pseudovotes for this film with their rating equal to mean rating across all movies. 
+
+Note: 
+- 25th quantile is hard-coded based on manually observing data summary to keep balance between reliable rating and keeping signal of movie's quality (own rating)
+
+---
+
+
+### Person
